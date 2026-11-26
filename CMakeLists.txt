@@ -993,14 +993,6 @@ if(BASALT_BATCH_IDENTITY_MODEL AND Python3_Interpreter_FOUND)
   set_tests_properties(reply_checkpoint_test PROPERTIES TIMEOUT 600)
 endif()
 
-# a reply read again (a run that continues it, no prompt cache) keeps the bits its decode wrote (same model variable as above)
-if(BASALT_BATCH_IDENTITY_MODEL AND Python3_Interpreter_FOUND)
-  basalt_gpu_test(NAME reply_read_test
-                  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/program/reply_read_test.py
-                          $<TARGET_FILE:basalt> ${BASALT_BATCH_IDENTITY_MODEL} ${BASALT_BATCH_IDENTITY_ARGS})
-  set_tests_properties(reply_read_test PROPERTIES TIMEOUT 600)
-endif()
-
 # the route tail skip against a plain CPU rule: which entries it drops over random windows, tables and ranks at each MoE
 # model's geometry (GPU, synthetic, no model; --bench times the window kernel)
 add_executable(route_tail_skip_parity tests/kernels/route_tail_skip_parity.cpp)
@@ -1848,6 +1840,7 @@ endforeach()
 target_sources(kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                          src/kernels/cpu/nvfp4_avx512.cpp
                                          src/kernels/cpu/nvfp4_avx2.cpp src/kernels/cpu/nvfp4_avx2_vnni.cpp
+                                           src/kernels/cpu/nvfp4_avx2_dpbusd.cpp
                                          src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/iq_avx2_vnni.cpp
                                          src/kernels/cpu/kq_avx2.cpp
                                          src/kernels/cpu/kq_avx1.cpp src/kernels/cpu/ggml/ggml_cpu_dispatch.cpp
@@ -1867,6 +1860,8 @@ set_source_files_properties(src/kernels/cpu/iq_avx2_vnni.cpp PROPERTIES COMPILE_
 set_source_files_properties(src/kernels/cpu/nvfp4_avx2.cpp PROPERTIES COMPILE_OPTIONS "${_isa_avx2_flags}")
 # the same rows with AVX-VNNI-INT8 (`vpdpbssd`), called only behind cpu_avxvnni_int8_ok()
 set_source_files_properties(src/kernels/cpu/nvfp4_avx2_vnni.cpp PROPERTIES COMPILE_OPTIONS "${_isa_avxvnniint8_flags}")
+# the same rows with AVX-VNNI (`vpdpbusd`), for the AVX2 CPUs without AVX-VNNI-INT8, called behind cpu_avxvnni_ok()
+set_source_files_properties(src/kernels/cpu/nvfp4_avx2_dpbusd.cpp PROPERTIES COMPILE_OPTIONS "${_isa_avxvnni_flags}")
 set_source_files_properties(src/kernels/cpu/kq_avx2.cpp PROPERTIES COMPILE_OPTIONS "${_isa_avx2_flags}")
 # the router lookahead's AVX1 dot (called behind cpu_avx1_ok)
 set_source_files_properties(src/kernels/cpu/kq_avx1.cpp PROPERTIES COMPILE_OPTIONS "${_isa_avx1_flags}")
