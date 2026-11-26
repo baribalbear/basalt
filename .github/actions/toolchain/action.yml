@@ -28,9 +28,9 @@ runs:
 
     - name: CUDA toolkit (Windows)
       if: runner.os == 'Windows'
-      uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+      uses: vhrabar/cuda-toolkit@e258a245fb754f9afb7f8ec9e55acaf9ddbe6398 # CUDA 13.5.0 (Jimver PR #448)
       with:
-        cuda: ${{ inputs.cuda-version }}
+        cuda: '13.5.0'
         method: network
         sub-packages: '["nvcc", "cudart", "crt", "nvvm", "cublas_dev", "nvrtc_dev", "visual_studio_integration"]'
         use-github-cache: true
