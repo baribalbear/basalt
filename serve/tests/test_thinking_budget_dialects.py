@@ -128,6 +128,35 @@ class Budget:
                          [("search", {"q": "2+2"})])
         self.assertEqual(b["choices"][0]["finish_reason"], "tool_calls")
 
+    def test_unset_max_tokens_with_text_prompt_does_not_overflow_on_wrapup(self):
+        # Regression for #595: when no max_tokens is sent and the engine takes PromptText, pass 1 is capped by the
+        # thinking budget (so ids.max_new comes back unclipped). Pass 2 must still stay within max_context.
+        from serve.prompt import PromptText
+        self.start(ANSWER)
+        self.engine.takes_text = True
+        orig = self.engine.generate
+
+        def counted(ids, max_new, sampling, cancel, embeddings=None, session=None):
+            if isinstance(ids, PromptText):
+                raw = ids.ids()
+                ids.set_counted(len(raw), int(max_new))
+                yield None
+                ids = raw
+            elif len(ids) + int(max_new) > self.engine.max_context:
+                raise ValueError(f"prompt ({len(ids)} tokens) + max_new ({max_new}) exceeds the context ({self.engine.max_context})")
+            yield from orig(ids, max_new, sampling, cancel, embeddings, session)
+
+        self.engine.generate = counted
+        body = {"model": "basalt", "messages": [{"role": "user", "content": "2+2?"}], "reasoning_budget_tokens": 20}
+        req = urllib.request.Request(f"http://127.0.0.1:{self.httpd.server_address[1]}/v1/chat/completions",
+                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            code, b = r.status, json.loads(r.read())
+        self.assertEqual(code, 200, b)
+        self.assertEqual(b["choices"][0]["message"]["content"], ANSWER)
+        self.assertEqual(b["choices"][0]["finish_reason"], "stop")
+        self.assertLessEqual(len(self.engine.prompts[1]) + self.engine.caps[1], self.engine.max_context)
+
 
 class QwenBudget(Budget, unittest.TestCase):
     case = QwenCase
@@ -154,12 +183,24 @@ class Inkling2Budget(unittest.TestCase):
         self.dialect = Inkling2()
         self.template = self.dialect.template(tpl_src)
 
-    def run_budget(self, reply_fn, budget=20):
-        tok, dialect = self.tok, self.dialect
+    def run_budget(self, reply_fn, budget=20, *, fit_max_tokens=False, takes_text=False, answer_room=None,
+                   max_tokens=2000):
+        from serve.prompt import CTX_SLACK, PromptText
+
+        tok, dialect, use_text = self.tok, self.dialect, takes_text
         caps, prompts = [], []
 
         class Eng(MockEngine):
+            takes_text = use_text
+
             def generate(self, ids, max_new, sampling, cancel, embeddings=None, session=None):
+                if isinstance(ids, PromptText):
+                    n = len(ids.ids())
+                    if ids.clip:
+                        max_new = min(max_new, 32768 - CTX_SLACK - n)
+                    ids.set_counted(n, max_new)
+                    yield None
+                    ids = ids.ids()
                 prompts.append(list(ids))
                 caps.append(max_new)
                 out = reply_fn(tok.decode(ids), len(prompts))
@@ -168,11 +209,16 @@ class Inkling2Budget(unittest.TestCase):
                         return
                     yield t
 
-        svc = Service(Eng(tok, "x", max_context=32768), tok, self.template, dialect=dialect)
+        svc = Service(Eng(tok, "x", max_context=32768), tok, self.template, dialect=dialect,
+                      fit_max_tokens=fit_max_tokens)
+        if answer_room is not None:
+            svc.answer_room = answer_room
         httpd = serve(svc, port=0)
         try:
-            body = {"model": "basalt", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 2000,
+            body = {"model": "basalt", "messages": [{"role": "user", "content": "2+2?"}],
                     "reasoning_budget_tokens": budget}
+            if max_tokens is not None:
+                body["max_tokens"] = max_tokens
             req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions",
                                          data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -201,6 +247,31 @@ class Inkling2Budget(unittest.TestCase):
         self.assertEqual(msg["content"], ANSWER)
         self.assertEqual(len(msg["reasoning_content"]), 19)     # <|content_thinking|> + 19 thinking bytes = budget 20
         self.assertTrue(self.tok.decode(prompts[-1]).endswith(THOUGHT[:19] + E))
+
+    def test_clipped_text_prompt_still_wraps_on_budget(self):
+        H, TH, TX, E, ET = self.HEADER, self.THINK, self.TEXT, self.END, self.END_TURN
+        full = H + TH + THOUGHT + E + H + TX + ANSWER + E + ET
+
+        def script(prompt, pass_n):
+            if prompt.endswith(E) and TH in prompt:
+                return H + TX + ANSWER + E + ET
+            idx = prompt.rfind(H + TH)
+            if idx >= 0:
+                said = prompt[idx:]
+                return full[len(said):]
+            return full
+
+        for label, fit, max_tokens in (("fit_max_tokens", True, 2000), ("omitted_max_tokens", False, None)):
+            with self.subTest(label):
+                code, body, caps, prompts = self.run_budget(
+                    script, budget=20, fit_max_tokens=fit, takes_text=True, answer_room=100, max_tokens=max_tokens)
+                self.assertEqual(code, 200, body)
+                self.assertEqual(caps[0], 20)
+                self.assertEqual(body["choices"][0]["finish_reason"], "stop")
+                msg = body["choices"][0]["message"]
+                self.assertEqual(msg["content"], ANSWER)
+                self.assertEqual(len(msg["reasoning_content"]), 19)
+                self.assertTrue(self.tok.decode(prompts[-1]).endswith(THOUGHT[:19] + E))
 
     def test_no_thinking_block_resumes_uncapped_on_pass2(self):
         H, TX, E, ET = self.HEADER, self.TEXT, self.END, self.END_TURN
